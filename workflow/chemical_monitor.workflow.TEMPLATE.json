@@ -1,0 +1,381 @@
+{
+  "name": "Chemical Process Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        0,
+        0
+      ],
+      "id": "6febd3bf-d612-48c8-a036-9a0018468654",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────\n// Data Simulator — generates 20 time-series readings per\n// variable for a simulated CSTR (continuous stirred-tank reactor)\n// ─────────────────────────────────────────────────────────────\n\nconst now = new Date();\nconst POINTS = 20;\nconst INTERVAL_MS = 5 * 60 * 1000;\n\nconst SPECS = {\n  reactor_temp: {\n    label: 'Reactor Temperature', unit: '°C',\n    baseline: 82.0, noise: 1.2,\n    min_valid: 65.0, max_valid: 105.0,\n    alarm_low: 72.0, alarm_high: 95.0,\n  },\n  outlet_pressure: {\n    label: 'Outlet Pressure', unit: 'bar',\n    baseline: 3.10, noise: 0.06,\n    min_valid: 1.5, max_valid: 6.0,\n    alarm_low: 2.0, alarm_high: 4.5,\n  },\n  coolant_flow: {\n    label: 'Coolant Flow Rate', unit: 'L/min',\n    baseline: 95.0, noise: 3.5,\n    min_valid: 20.0, max_valid: 200.0,\n    alarm_low: 40.0, alarm_high: 160.0,\n  },\n  feed_pH: {\n    label: 'Feed pH', unit: 'pH',\n    baseline: 7.05, noise: 0.07,\n    min_valid: 4.0, max_valid: 10.0,\n    alarm_low: 6.2, alarm_high: 8.0,\n  }\n};\n\nfunction randn() {\n  let u = 0, v = 0;\n  while (u === 0) u = Math.random();\n  while (v === 0) v = Math.random();\n  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);\n}\n\nfunction round(val, dp) {\n  return parseFloat(val.toFixed(dp));\n}\n\nconst DECIMALS = {\n  reactor_temp: 1,\n  outlet_pressure: 3,\n  coolant_flow: 1,\n  feed_pH: 2\n};\n\nconst ANOMALY_ROLL = Math.random();\nconst ANOMALY_TYPE =\n  ANOMALY_ROLL < 0.30 ? 'none' :\n  ANOMALY_ROLL < 0.55 ? 'spike' :\n  ANOMALY_ROLL < 0.75 ? 'drift' :\n  ANOMALY_ROLL < 0.88 ? 'dropout' :\n  'range_violation';\n\nconst VAR_NAMES = Object.keys(SPECS);\nconst AFFECTED_VAR = VAR_NAMES[Math.floor(Math.random() * VAR_NAMES.length)];\n\nconst series = {};\nfor (const varName of VAR_NAMES) {\n  series[varName] = [];\n}\n\nfor (let i = 0; i < POINTS; i++) {\n  const ts = new Date(now.getTime() - (POINTS - 1 - i) * INTERVAL_MS).toISOString();\n  const isLast = i === POINTS - 1;\n\n  for (const [varName, spec] of Object.entries(SPECS)) {\n    const isAffected = varName === AFFECTED_VAR;\n    let value;\n\n    if (!isAffected || ANOMALY_TYPE === 'none') {\n      value = spec.baseline + randn() * spec.noise;\n\n    } else if (ANOMALY_TYPE === 'spike' && isLast) {\n      const dir = Math.random() > 0.5 ? 1 : -1;\n      value = spec.baseline + dir * spec.noise * (4 + Math.random() * 3);\n\n    } else if (ANOMALY_TYPE === 'drift') {\n      const driftStart = POINTS - 10;\n      if (i >= driftStart) {\n        const fraction = (i - driftStart) / (POINTS - driftStart);\n        value = spec.baseline + randn() * spec.noise + fraction * spec.noise * 5;\n      } else {\n        value = spec.baseline + randn() * spec.noise;\n      }\n\n    } else if (ANOMALY_TYPE === 'dropout' && isLast) {\n      const prev = series[varName][i - 1];\n      value = prev ? prev.value : spec.baseline;\n\n    } else if (ANOMALY_TYPE === 'range_violation' && isLast) {\n      value = spec.max_valid * (1.05 + Math.random() * 0.10);\n\n    } else {\n      value = spec.baseline + randn() * spec.noise;\n    }\n\n    series[varName].push({\n      timestamp: ts,\n      value: round(value, DECIMALS[varName])\n    });\n  }\n}\n\nreturn [{\n  json: {\n    generated_at: now.toISOString(),\n    anomaly_injected: ANOMALY_TYPE,\n    affected_variable: ANOMALY_TYPE !== 'none' ? AFFECTED_VAR : null,\n    specs: SPECS,\n    series: series,\n    latest_values: Object.fromEntries(\n      VAR_NAMES.map(k => [k, series[k][series[k].length - 1].value])\n    )\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        0
+      ],
+      "id": "b236fce6-91e9-40cd-9f72-936f97a79b95",
+      "name": "Data Simulator"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────\n// Anomaly Detector\n// Reads series data from Data Simulator and runs 3 statistical\n// tests per variable: Z-score, Rate-of-Change, Hard range check\n// ─────────────────────────────────────────────────────────────\n\nconst { series, specs } = $input.first().json;\n\nconst Z_THRESHOLD     = 2.5;\nconst ROC_Z_THRESHOLD = 3.0;\nconst DROPOUT_TOL     = 1e-6;\n\nconst anomalies = [];\n\nfor (const [varName, spec] of Object.entries(specs)) {\n  const points  = series[varName];\n  const values  = points.map(p => p.value);\n  const n       = values.length;\n  const latest  = values[n - 1];\n  const ts      = points[n - 1].timestamp;\n\n  // ── Test 1: Rolling Z-score ───────────────────────────────\n  // Use first 19 points as reference window.\n  // This prevents the anomalous point from distorting the mean.\n  const window  = values.slice(0, n - 1);\n  const mean    = window.reduce((a, b) => a + b, 0) / window.length;\n  const variance = window.reduce((s, v) => s + (v - mean) ** 2, 0) / window.length;\n  const std     = Math.sqrt(variance);\n  const zScore  = std > 0 ? Math.abs(latest - mean) / std : 0;\n\n  // ── Test 2: Rate-of-Change Z-score ───────────────────────\n  // Checks if the JUMP between the last two readings is unusual\n  // compared to historical jumps in this variable.\n  const deltas = [];\n  for (let i = 1; i < n; i++) {\n    deltas.push(Math.abs(values[i] - values[i - 1]));\n  }\n  const latestDelta  = deltas[deltas.length - 1];\n  const histDeltas   = deltas.slice(0, deltas.length - 1);\n  const deltaMean    = histDeltas.reduce((a, b) => a + b, 0) / histDeltas.length;\n  const deltaVar     = histDeltas.reduce((s, d) => s + (d - deltaMean) ** 2, 0) / histDeltas.length;\n  const deltaStd     = Math.sqrt(deltaVar);\n  const rocZScore    = deltaStd > 0 ? (latestDelta - deltaMean) / deltaStd : 0;\n\n  // ── Test 3: Hard range and alarm limit checks ─────────────\n  const outOfRange   = latest < spec.min_valid || latest > spec.max_valid;\n  const outOfAlarm   = latest < spec.alarm_low  || latest > spec.alarm_high;\n\n  // ── Test 4: Sensor dropout (frozen reading) ───────────────\n  const last3        = values.slice(-3);\n  const isFrozen     = last3.length === 3 &&\n                       Math.abs(last3[2] - last3[1]) < DROPOUT_TOL &&\n                       Math.abs(last3[1] - last3[0]) < DROPOUT_TOL;\n\n  // ── Decision: classify anomaly type and severity ──────────\n  let anomalyType = null;\n  let severity    = 'normal';\n\n  if (outOfRange) {\n    anomalyType = 'range_violation';\n    severity    = 'critical';\n  } else if (isFrozen) {\n    anomalyType = 'sensor_dropout';\n    severity    = 'high';\n  } else if (zScore > Z_THRESHOLD && rocZScore > ROC_Z_THRESHOLD) {\n    anomalyType = 'spike';\n    severity    = 'high';\n  } else if (zScore > Z_THRESHOLD) {\n    anomalyType = 'statistical_deviation';\n    severity    = 'medium';\n  } else if (rocZScore > ROC_Z_THRESHOLD) {\n    anomalyType = 'rapid_change';\n    severity    = 'medium';\n  } else if (outOfAlarm) {\n    anomalyType = 'alarm_limit_breach';\n    severity    = 'low';\n  }\n\n  if (anomalyType) {\n    anomalies.push({\n      variable:      varName,\n      label:         spec.label,\n      unit:          spec.unit,\n      current_value: latest,\n      baseline_mean: parseFloat(mean.toFixed(4)),\n      baseline_std:  parseFloat(std.toFixed(4)),\n      z_score:       parseFloat(zScore.toFixed(3)),\n      roc_z_score:   parseFloat(rocZScore.toFixed(3)),\n      anomaly_type:  anomalyType,\n      severity:      severity,\n      valid_range:   `${spec.min_valid}–${spec.max_valid} ${spec.unit}`,\n      alarm_range:   `${spec.alarm_low}–${spec.alarm_high} ${spec.unit}`,\n      timestamp:     ts,\n      recent_trend:  values.slice(-5).map((v, i) =>\n        `t-${(4 - i) * 5}min: ${v}`\n      ).join(' | ')\n    });\n  }\n}\n\n// Sort by severity so the worst anomaly is always first\nconst SEV = { critical: 0, high: 1, medium: 2, low: 3 };\nanomalies.sort((a, b) => SEV[a.severity] - SEV[b.severity]);\n\nreturn [{\n  json: {\n    ...$input.first().json,\n    has_anomaly:     anomalies.length > 0,\n    anomaly_count:   anomalies.length,\n    primary_anomaly: anomalies[0] ?? null,\n    all_anomalies:   anomalies,\n    checked_at:      new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        352,
+        0
+      ],
+      "id": "469bb9e4-3ced-4b4e-9277-e7d0173d4a57",
+      "name": "Anomaly Detector"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "3e1202d4-5c48-4bb3-8f19-b4612c15b0a8",
+              "leftValue": "={{ $json.has_anomaly }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        528,
+        0
+      ],
+      "id": "bc7c66a8-6cfd-461a-9b83-b0fb14dad7e2",
+      "name": "Anomaly Detected?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        736,
+        176
+      ],
+      "id": "e9df46d6-a4fe-4410-b638-8df355a931b5",
+      "name": "Clean run - no anomaly"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://quickchart.io/chart",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.chart_body }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "chart_image"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        912,
+        -64
+      ],
+      "id": "a78eed8e-3083-4da9-aa43-e02e453b4cd2",
+      "name": "QuickChart - Generate Chart"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the QuickChart request body cleanly\n// This avoids JSON expression issues in the HTTP Request node\n\nconst data = $input.first().json;\nconst varName = data.primary_anomaly.variable;\nconst varData = data.series[varName];\n\n// Extract timestamps (show only HH:MM)\nconst labels = varData.map(p => p.timestamp.slice(11, 16));\n\n// Extract values\nconst values = varData.map(p => p.value);\n\n// Build the chart config as a proper JavaScript object\n// then stringify it so HTTP Request receives clean JSON\nconst chartConfig = {\n  width: 800,\n  height: 400,\n  backgroundColor: \"white\",\n  chart: {\n    type: \"line\",\n    data: {\n      labels: labels,\n      datasets: [{\n        label: `${data.primary_anomaly.label} (${data.primary_anomaly.unit})`,\n        data: values,\n        borderColor: \"rgb(59,130,246)\",\n        backgroundColor: \"rgba(59,130,246,0.08)\",\n        borderWidth: 2,\n        pointRadius: 4,\n        tension: 0.3,\n        fill: true\n      }]\n    },\n    options: {\n      plugins: {\n        title: {\n          display: true,\n          text: `ANOMALY DETECTED: ${data.primary_anomaly.label}`,\n          color: \"#dc2626\",\n          font: { size: 16, weight: \"bold\" }\n        }\n      },\n      scales: {\n        x: { ticks: { maxTicksLimit: 10 } },\n        y: {\n          title: {\n            display: true,\n            text: `${data.primary_anomaly.label} (${data.primary_anomaly.unit})`\n          }\n        }\n      }\n    }\n  }\n};\n\n// Pass everything forward including the chart config as a string\nreturn [{\n  json: {\n    ...data,\n    chart_body: JSON.stringify(chartConfig)\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        736,
+        -64
+      ],
+      "id": "1f7eae9a-01ea-4a02-9654-6a189be82a58",
+      "name": "Build Chart Config"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "8f565f6a-70a9-4c4a-9cf0-5371fdc81c7e",
+              "name": "ai_report",
+              "value": "={{ $json.candidates[0].content.parts[0].text }}",
+              "type": "string"
+            },
+            {
+              "id": "c9c60b6d-559b-4ab5-be63-ccf54cd1ee22",
+              "name": "primary_anomaly",
+              "value": "={{ $('Anomaly Detector').first().json.primary_anomaly }}",
+              "type": "object"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1344,
+        -208
+      ],
+      "id": "8ddd990a-004a-4eb1-8328-dc84a6f46d4a",
+      "name": "Extract AI Report"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"parts\": [\n        {\n          \"text\": \"You are an automated process safety monitoring system for a chemical reactor plant. A sensor anomaly has been detected. Generate a concise, professional incident notification.\\n\\nANOMALY DETAILS:\\n- Variable: {{ $json.primary_anomaly.label }}\\n- Current reading: {{ $json.primary_anomaly.current_value }} {{ $json.primary_anomaly.unit }}\\n- Valid process range: {{ $json.primary_anomaly.valid_range }}\\n- Alarm range: {{ $json.primary_anomaly.alarm_range }}\\n- Z-score: {{ $json.primary_anomaly.z_score }} (threshold: 2.5)\\n- Rate-of-change deviation: {{ $json.primary_anomaly.roc_z_score }} sigma\\n- Anomaly type: {{ $json.primary_anomaly.anomaly_type }}\\n- Severity: {{ $json.primary_anomaly.severity }}\\n- Timestamp: {{ $json.primary_anomaly.timestamp }}\\n- Recent trend: {{ $json.primary_anomaly.recent_trend }}\\n\\nWrite a 3-paragraph incident notification:\\n\\nPARA 1 - Incident summary: State the variable, value, anomaly type, and severity factually.\\n\\nPARA 2 - Engineering context: Describe the most likely process cause and potential downstream impact.\\n\\nPARA 3 - Immediate actions: Give 3 specific steps for a process operator to take right now.\\n\\nTone: Professional, direct, factual. Maximum 180 words.\"\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"maxOutputTokens\": 400,\n    \"temperature\": 0.3\n  }\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1152,
+        -208
+      ],
+      "id": "7a86d1b8-b70b-4401-8e3f-1761071d0a32",
+      "name": "Gemini API - Incident Report",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "MX0Zge7LQjSBX4wN",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "sendPhoto",
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "binaryData": true,
+        "binaryPropertyName": "chart_image",
+        "additionalFields": {
+          "caption": "=🔴 <b>PROCESS ANOMALY ALERT</b>\n\n<b>Severity:</b> {{ $json.primary_anomaly.severity.toUpperCase() }}\n<b>Variable:</b> {{ $json.primary_anomaly.label }}\n<b>Reading:</b> {{ $json.primary_anomaly.current_value }} {{ $json.primary_anomaly.unit }}\n<b>Z-score:</b> {{ $json.primary_anomaly.z_score }}σ\n<b>Type:</b> {{ $json.primary_anomaly.anomaly_type }}\n<b>Valid range:</b> {{ $json.primary_anomaly.valid_range }}\n<b>Time:</b> {{ $json.primary_anomaly.timestamp }}\n\n{{ $json.ai_report.slice(0, 600) }}\n\n<i>— Chemical Process Monitor v1.0</i>",
+          "parse_mode": "HTML"
+        }
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1712,
+        -80
+      ],
+      "id": "83d25742-a338-477f-8030-6603381ced27",
+      "name": "Telegram - Send Alert",
+      "webhookId": "76e381b4-3f15-4ea4-bdbf-f2e9818a6612",
+      "credentials": {
+        "telegramApi": {
+          "id": "GoF5SjmxPFyAl49Y",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1504,
+        -80
+      ],
+      "id": "7791eaeb-da90-4d2d-a833-943e553e4297",
+      "name": "Merge Chart and Report"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Data Simulator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Data Simulator": {
+      "main": [
+        [
+          {
+            "node": "Anomaly Detector",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anomaly Detector": {
+      "main": [
+        [
+          {
+            "node": "Anomaly Detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anomaly Detected?": {
+      "main": [
+        [
+          {
+            "node": "Build Chart Config",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Clean run - no anomaly",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Chart Config": {
+      "main": [
+        [
+          {
+            "node": "QuickChart - Generate Chart",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QuickChart - Generate Chart": {
+      "main": [
+        [
+          {
+            "node": "Gemini API - Incident Report",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Chart and Report",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Gemini API - Incident Report": {
+      "main": [
+        [
+          {
+            "node": "Extract AI Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract AI Report": {
+      "main": [
+        [
+          {
+            "node": "Merge Chart and Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Chart and Report": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Send Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "b186a368-1f4e-45a9-85e3-d3ed3aa9bed8",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "30792cba84348e0c10ecdc41746da4ee5fb1014eed30dc604227eeb79a32115d"
+  },
+  "id": "4CqzMLAoRxdhk83X",
+  "tags": []
+}
