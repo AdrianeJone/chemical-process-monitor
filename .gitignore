@@ -142,3 +142,6 @@ vite.config.ts.timestamp-*
 .env
 n8n_data/
 backups/
+
+# n8n workflow export — contains node configs, keep local only
+workflow/chemical_monitor.workflow.json
