@@ -31,6 +31,6 @@ Add these to your .env file (copy from .env.example):
 
 1. Open the Chemical Process Monitor workflow
 2. Update the Telegram node Chat ID field with your chat ID
-3. Update the Format Error Message node — replace YOUR_TELEGRAM_CHAT_ID
+3. Update the Format Error Message node, replace YOUR_TELEGRAM_CHAT_ID
 4. Link the Error Handler in main workflow Settings → Error Workflow
 5. Publish both workflows
