@@ -145,3 +145,6 @@ backups/
 
 # n8n workflow export — contains node configs, keep local only
 workflow/chemical_monitor.workflow.json
+
+# Error handler workflow export
+workflow/error_handler.workflow.json

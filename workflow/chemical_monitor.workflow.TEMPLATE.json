@@ -120,11 +120,12 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.4,
       "position": [
-        912,
+        1008,
         -64
       ],
       "id": "a78eed8e-3083-4da9-aa43-e02e453b4cd2",
-      "name": "QuickChart - Generate Chart"
+      "name": "QuickChart - Generate Chart",
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -133,7 +134,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        736,
+        832,
         -64
       ],
       "id": "1f7eae9a-01ea-4a02-9654-6a189be82a58",
@@ -250,6 +251,19 @@
       ],
       "id": "7791eaeb-da90-4d2d-a833-943e553e4297",
       "name": "Merge Chart and Report"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────\n// Anti-Flap Guard\n// Suppresses repeated alerts for the same variable within\n// a 30-minute cooldown window using n8n static data storage.\n// If the same variable was alerted recently, stop execution.\n// ─────────────────────────────────────────────────────────────\n\nconst COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes in milliseconds\n\n// Static data persists between workflow runs (stored in n8n DB)\nconst store = $getWorkflowStaticData('global');\n\nconst data = $input.first().json;\nconst varName = data.primary_anomaly.variable;\nconst severity = data.primary_anomaly.severity;\nconst now = Date.now();\n\n// Critical severity always bypasses the cooldown\n// High/medium/low respect the 30-minute window\nif (severity !== 'critical') {\n  const lastAlerted = store[varName];\n\n  if (lastAlerted && (now - lastAlerted) < COOLDOWN_MS) {\n    const minutesAgo = Math.round((now - lastAlerted) / 60000);\n    // Return empty array — stops execution on this path silently\n    // The workflow ends cleanly without sending an alert\n    console.log(`Suppressed alert for ${varName} — last alerted ${minutesAgo} min ago`);\n    return [];\n  }\n}\n\n// Update the last alerted timestamp for this variable\nstore[varName] = now;\n\n// Pass data through unchanged\nreturn [$input.first()];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        -176
+      ],
+      "id": "6314efe1-331b-417c-b609-18b88f8bb955",
+      "name": "Anti-Flap Guard"
     }
   ],
   "pinData": {},
@@ -291,7 +305,7 @@
       "main": [
         [
           {
-            "node": "Build Chart Config",
+            "node": "Anti-Flap Guard",
             "type": "main",
             "index": 0
           }
@@ -364,14 +378,29 @@
           }
         ]
       ]
+    },
+    "Anti-Flap Guard": {
+      "main": [
+        [
+          {
+            "node": "Build Chart Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
-  "active": false,
+  "active": true,
   "settings": {
     "executionOrder": "v1",
-    "binaryMode": "separate"
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "errorWorkflow": "xNOxY1ekGk2lHWoX",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
   },
-  "versionId": "b186a368-1f4e-45a9-85e3-d3ed3aa9bed8",
+  "versionId": "28163094-981b-4b7f-8f28-623d0ef4817f",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "30792cba84348e0c10ecdc41746da4ee5fb1014eed30dc604227eeb79a32115d"

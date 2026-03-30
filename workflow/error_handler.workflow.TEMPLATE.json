@@ -1,0 +1,88 @@
+{
+  "name": "Chemical Monitor — Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "20eaa6ca-73c8-46b8-bb21-cf8f6774713d",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ─────────────────────────────────────────────────────────────\n// Format Error Message\n// Builds a readable Telegram message from the error payload\n// that n8n's Error Trigger provides automatically\n// ─────────────────────────────────────────────────────────────\n\nconst err = $input.first().json;\n\n// Extract the useful parts from n8n's error payload\nconst workflowName = err.workflow?.name ?? 'Unknown workflow';\nconst lastNode     = err.execution?.lastNodeExecuted ?? 'Unknown node';\nconst errorMessage = err.execution?.error?.message ?? 'No error message';\nconst errorType    = err.execution?.error?.name ?? 'UnknownError';\nconst executionId  = err.execution?.id ?? 'N/A';\nconst timestamp    = new Date().toISOString();\n\nconst message = `⚠️ WORKFLOW FAILURE\n\nWorkflow: ${workflowName}\nFailed node: ${lastNode}\nError type: ${errorType}\nMessage: ${errorMessage}\nExecution ID: ${executionId}\nTime: ${timestamp}\n\nCheck n8n at http://localhost:5678 for details.`;\n\nreturn [{\n  json: {\n    error_message: message,\n    telegram_chat_id: YOUR_TELEGRAM_CHAT_ID\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        0
+      ],
+      "id": "afccaec8-728d-47e9-9a15-0235d3e0a203",
+      "name": "Format Error Message"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.telegram_chat_id }}",
+        "text": "={{ $json.error_message }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        416,
+        0
+      ],
+      "id": "1dab6380-437d-4f5c-aaf2-4d458a721a79",
+      "name": "Telegram - Error Alert",
+      "webhookId": "16f70ef9-2776-4ae6-9def-bfca35b21b38",
+      "credentials": {
+        "telegramApi": {
+          "id": "GoF5SjmxPFyAl49Y",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error Message": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "439e3e04-47d3-4432-98f7-eb493be64348",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "30792cba84348e0c10ecdc41746da4ee5fb1014eed30dc604227eeb79a32115d"
+  },
+  "id": "xNOxY1ekGk2lHWoX",
+  "tags": []
+}
